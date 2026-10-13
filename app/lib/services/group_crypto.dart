@@ -2,11 +2,14 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as hashes;
 import 'package:cryptography/cryptography.dart';
 
 /// Crockford base32 (no I, L, O, U) – easy to read aloud and type.
 const _alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-const _secretLength = 10; // 80 bits -> 16 base32 characters
+// 10 bytes = 16 base32 characters: 75 random bits + a 5-bit check symbol
+// (the last character) that catches ~97% of typos.
+const _secretLength = 10;
 const _messagePrefix = 'nv1.';
 
 /// The shared secret of one ntfy group. Everything is derived from it:
@@ -28,7 +31,7 @@ class GroupSecret {
 
   static Future<GroupSecret> generate() {
     final random = Random.secure();
-    return fromBytes(List<int>.generate(_secretLength, (_) => random.nextInt(256)));
+    return fromBytes(withCheckSymbol(List<int>.generate(_secretLength, (_) => random.nextInt(256))));
   }
 
   static Future<GroupSecret> fromBytes(List<int> bytes) async {
@@ -116,7 +119,23 @@ Uint8List? parseCode(String code) {
       value &= (1 << bits) - 1;
     }
   }
-  return out.length == _secretLength ? Uint8List.fromList(out) : null;
+  if (out.length != _secretLength) return null;
+  if ((out[_secretLength - 1] & 31) != _checkSymbol(out)) return null;
+  return Uint8List.fromList(out);
+}
+
+/// Replaces the last 5 bits of a 10-byte secret with its check symbol.
+Uint8List withCheckSymbol(List<int> bytes) {
+  final out = Uint8List.fromList(bytes);
+  out[_secretLength - 1] = (out[_secretLength - 1] & 0xE0) | _checkSymbol(out);
+  return out;
+}
+
+/// 5-bit checksum over the 75 random bits of a secret.
+int _checkSymbol(List<int> bytes) {
+  final payload = List<int>.of(bytes);
+  payload[_secretLength - 1] &= 0xE0;
+  return hashes.sha256.convert([...utf8.encode('navig-code-v1:'), ...payload]).bytes.first & 31;
 }
 
 String _hex(List<int> bytes) => bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();

@@ -67,12 +67,23 @@ void main() {
       expect(again!.topic, secret.topic);
       expect(secret.topic, matches(RegExp(r'^navig_[0-9a-f]{32}$')));
 
-      final bytes = parseCode('0000-0000-0000-0001');
-      expect(bytes, isNotNull);
-      expect(parseCode('OOOO-OOOO-OOOO-OOOl'), bytes);
+      final fixed = withCheckSymbol(List<int>.generate(10, (i) => i * 37 % 256));
+      final code = formatCode(fixed);
+      expect(parseCode(code), fixed);
+      expect(parseCode(code.replaceAll('0', 'O').replaceAll('1', 'l').replaceAll('-', '')), fixed);
       expect(parseCode('ABC123'), isNull);
       expect(parseCode('UUUU-UUUU-UUUU-UUUU'), isNull);
-      expect(formatCode(bytes!), '0000-0000-0000-0001');
+
+      // The check symbol catches typos.
+      const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+      final raw = code.replaceAll('-', '');
+      var caught = 0;
+      for (var i = 0; i < raw.length; i++) {
+        final other = alphabet[(alphabet.indexOf(raw[i]) + 7) % 32];
+        final typo = raw.substring(0, i) + other + raw.substring(i + 1);
+        if (parseCode(typo) == null) caught++;
+      }
+      expect(caught, greaterThanOrEqualTo(14));
     });
 
     test('messages are encrypted, authenticated and bound to the group', () async {
@@ -109,6 +120,14 @@ void main() {
     test('probe detects ntfy servers', () async {
       expect(await NtfyBackend.probe(url), isTrue);
       expect(await NtfyBackend.probe('http://127.0.0.1:9'), isFalse);
+    });
+
+    test('reads the quota of ntfy.sh', () async {
+      if (Uri.parse(url).host != 'ntfy.sh') return;
+      final backend = await NtfyBackend.register(url, MemoryStore(), name: 'Q', color: '#FF4D6D', emoji: '');
+      await backend.refreshQuota();
+      expect(backend.usage.limit, 250);
+      expect(backend.usage.sent, inInclusiveRange(0, 250));
     });
 
     test('two friends share locations, names, nudges and leave', () async {
@@ -248,6 +267,25 @@ void main() {
       await backend.postLocations([point(10.5, 106.5, speed: 12)]);
       expect(fake!.rejected, 1, reason: 'waits for the quota to reset');
       fake!.rejectAfter = null;
+      backend.close();
+    });
+
+    test('follows the quota the server reports', () async {
+      if (fake == null) return;
+      fake!.accountLimit = 250;
+      fake!.accountRemaining = 10; // others behind the same IP used most of it
+      final backend = await NtfyBackend.register(url, MemoryStore(),
+          name: 'Q', color: '#FF4D6D', emoji: '', policy: NtfyPolicy.ntfySh);
+      backend.connect(onMessage: (_) {}, onStatus: (_) {});
+      await waitFor(() => backend.usage.sent == 240, reason: 'account sync');
+      await backend.createGroup('Quota');
+      final before = fake!.publishCount;
+      await backend.postLocations([point(10, 106)]);
+      expect(fake!.publishCount, before, reason: 'keeps the last messages for important updates');
+      await backend.updateMe(name: 'Q2');
+      expect(fake!.publishCount, before + 1, reason: 'profile changes still go out');
+      fake!.accountLimit = null;
+      fake!.accountRemaining = null;
       backend.close();
     });
 

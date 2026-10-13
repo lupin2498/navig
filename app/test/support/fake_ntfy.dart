@@ -17,6 +17,10 @@ class FakeNtfy {
   /// When set, publishes beyond this many return HTTP 429.
   int? rejectAfter;
   int rejectCode = 42901;
+
+  /// When set, GET /v1/account reports this quota (like ntfy.sh does).
+  int? accountLimit;
+  int? accountRemaining;
   int publishCount = 0;
   int rejected = 0;
 
@@ -69,6 +73,13 @@ class FakeNtfy {
     try {
       if (req.method == 'GET' && req.uri.path == '/v1/health') {
         return await _json(req.response, {'healthy': true});
+      }
+      if (req.method == 'GET' && req.uri.path == '/v1/account' && accountLimit != null) {
+        return await _json(req.response, {
+          'basis': 'ip',
+          'limits': {'basis': 'ip', 'messages': accountLimit, 'messages_expiry_duration': 43200},
+          'stats': {'messages': accountLimit! - (accountRemaining ?? accountLimit!), 'messages_remaining': accountRemaining},
+        });
       }
       if (segments.length == 1 && req.method == 'POST') {
         final topic = segments.first;

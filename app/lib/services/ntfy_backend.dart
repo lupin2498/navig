@@ -145,6 +145,13 @@ class NtfyBackend implements Backend {
   String _sentDay = '';
   int _sentToday = 0;
   DateTime? _backoffUntil;
+  int? _serverLimit; // daily message limit reported by GET /v1/account
+  DateTime? _accountSyncedAt;
+
+  // Trails of everyone (including us) built from the locations seen while
+  // running; merged with the server cache in [history] because ntfy.sh may
+  // write its cache a little after delivering messages live.
+  final Map<String, List<HistoryPoint>> _trails = {};
 
   // Realtime
   RealtimeClient? _realtime;
@@ -509,6 +516,7 @@ class NtfyBackend implements Backend {
       'charging': ?(p['charging'] as bool?),
       'moving': moving,
     };
+    _recordTrail(_user.id, HistoryPoint(lat: lat, lng: lng, ts: DateTime.fromMillisecondsSinceEpoch(ts), speed: speed));
     _persistSoon();
     _emit({'type': 'location', 'userId': _user.id, 'location': _myLocation()});
     if (_user.sharing) await _maybePublish();
@@ -565,7 +573,41 @@ class NtfyBackend implements Backend {
   /// Messages sent today and the daily limit, e.g. for the settings screen.
   ({int sent, int? limit}) get usage {
     _rollDay(_clock());
-    return (sent: _sentToday, limit: policy.dailyLimit);
+    return (sent: _sentToday, limit: _dailyLimit);
+  }
+
+  /// The stricter of our policy and what the server says it allows.
+  int? get _dailyLimit {
+    final a = policy.dailyLimit;
+    final b = _serverLimit;
+    if (a == null) return b;
+    if (b == null) return a;
+    return math.min(a, b);
+  }
+
+  /// Re-reads the quota from the server (see [usage]).
+  Future<void> refreshQuota() => _syncAccount();
+
+  /// Reads the quota the server applies to us (`GET /v1/account`, not rate
+  /// limited). On ntfy.sh the count is shared by everyone behind our IP.
+  Future<void> _syncAccount() async {
+    _accountSyncedAt = _clock();
+    try {
+      final res = await _client.get(Uri.parse('$baseUrl/v1/account'), headers: _headers).timeout(_timeout);
+      if (res.statusCode != 200) return;
+      final json = jsonDecode(utf8.decode(res.bodyBytes));
+      if (json is! Map) return;
+      final limit = (json['limits'] as Map?)?['messages'];
+      final remaining = (json['stats'] as Map?)?['messages_remaining'];
+      if (limit is! num || limit <= 0) return;
+      _serverLimit = limit.toInt();
+      if (remaining is num) {
+        _rollDay(_clock());
+        _sentToday = math.max(_sentToday, _serverLimit! - remaining.toInt());
+      }
+    } catch (_) {
+      // Older servers or no network: keep the local estimate.
+    }
   }
 
   static String _utcDay(DateTime t) => t.toUtc().toIso8601String().substring(0, 10);
@@ -590,14 +632,14 @@ class NtfyBackend implements Backend {
   DateTime _allowanceAt(DateTime now, {required bool moving, required bool critical}) {
     final backoff = _backoffUntil;
     if (backoff != null && backoff.isAfter(now)) return backoff;
-    final limit = policy.dailyLimit;
+    final limit = _dailyLimit;
     if (limit == null) return now;
     _rollDay(now);
     final groups = math.max(1, _groups.length);
     final midnight = _nextUtcMidnight(now);
     final remaining = limit - _sentToday;
     if (critical) return remaining >= groups ? now : midnight;
-    final usable = remaining - policy.reserve;
+    final usable = remaining - math.min(policy.reserve, limit ~/ 10);
     if (usable < groups) return midnight;
     final secondsLeft = math.max(1, midnight.difference(now).inSeconds);
     final heartbeatsNeeded = (secondsLeft / policy.stationaryInterval.inSeconds).ceil() * groups;
@@ -700,11 +742,12 @@ class NtfyBackend implements Backend {
     }
     if (code == 42908) {
       _rollDay(now);
-      _sentToday = math.max(_sentToday, policy.dailyLimit ?? _sentToday);
+      _sentToday = math.max(_sentToday, _dailyLimit ?? _sentToday);
       _backoffUntil = _nextUtcMidnight(now);
     } else {
       _backoffUntil = now.add(Duration(seconds: code == 42901 ? 30 : 60));
     }
+    unawaited(_syncAccount());
     _persistSoon();
   }
 
@@ -730,10 +773,20 @@ class NtfyBackend implements Backend {
       for (final g in _groups.values)
         if (userId == _user.id || g.members.containsKey(userId)) g.topic,
     ];
-    if (topics.isEmpty) return const [];
-    final window = math.min(hours, policy.cacheHours);
-    final events = await _poll(topics, since: '${window}h');
     final points = <int, HistoryPoint>{};
+    final cutoff = _now - hours * 3600 * 1000;
+    for (final p in _trails[userId] ?? const <HistoryPoint>[]) {
+      if (p.ts.millisecondsSinceEpoch >= cutoff) points[p.ts.millisecondsSinceEpoch] = p;
+    }
+    if (topics.isEmpty) return [for (final k in points.keys.toList()..sort()) points[k]!];
+    final window = math.min(hours, policy.cacheHours);
+    List<Map<String, dynamic>> events;
+    try {
+      events = await _poll(topics, since: '${window}h');
+    } on ApiException {
+      if (points.isEmpty) rethrow;
+      events = const [];
+    }
     for (final e in events) {
       final group = _groups[e['topic']];
       final message = e['message'];
@@ -756,6 +809,21 @@ class NtfyBackend implements Backend {
     }
     final sorted = points.keys.toList()..sort();
     return [for (final k in sorted) points[k]!];
+  }
+
+  void _recordTrail(String userId, HistoryPoint point) {
+    final trail = _trails.putIfAbsent(userId, () => []);
+    final last = trail.isEmpty ? null : trail.last;
+    if (last != null) {
+      if (!point.ts.isAfter(last.ts)) return;
+      final moved = distanceBetween(last.lat, last.lng, point.lat, point.lng);
+      if (moved < 25 && point.ts.difference(last.ts) < const Duration(minutes: 5)) return;
+    }
+    trail.add(point);
+    final cutoff = _clock().subtract(Duration(hours: math.max(24, policy.cacheHours)));
+    while (trail.length > 3000 || (trail.isNotEmpty && trail.first.ts.isBefore(cutoff))) {
+      trail.removeAt(0);
+    }
   }
 
   Future<List<Map<String, dynamic>>> _poll(List<String> topics, {required String since}) async {
@@ -802,7 +870,14 @@ class NtfyBackend implements Backend {
     _onMessage = onMessage;
     _onStatus = onStatus;
     _sweepTimer?.cancel();
-    _sweepTimer = Timer.periodic(_onlineSweep, (_) => _sweepPresence());
+    _sweepTimer = Timer.periodic(_onlineSweep, (_) {
+      _sweepPresence();
+      final synced = _accountSyncedAt;
+      if (synced == null || _clock().difference(synced) > const Duration(minutes: 30)) {
+        unawaited(_syncAccount());
+      }
+    });
+    unawaited(_syncAccount());
     _resubscribe();
     // Publish right away when something is pending from a previous run.
     _kick();
@@ -919,6 +994,15 @@ class NtfyBackend implements Backend {
             m.location = l;
             locationChanged = true;
           }
+          _recordTrail(
+            sender.id,
+            HistoryPoint(
+              lat: (l['lat'] as num).toDouble(),
+              lng: (l['lng'] as num).toDouble(),
+              ts: DateTime.fromMillisecondsSinceEpoch(ts),
+              speed: (l['speed'] as num?)?.toDouble(),
+            ),
+          );
         }
         if (!groupChanged) {
           if (profileChanged) _emit({'type': 'profile', 'user': sender.toJson()});
