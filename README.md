@@ -58,8 +58,9 @@ Nên đặt máy chủ sau HTTPS (Caddy/Nginx/Cloudflare Tunnel). Kiểm tra: `c
 
 ## 2. Bộ cài Android & iOS
 
-Bộ cài được build tự động bởi GitHub Actions (**Actions → Build Android & iOS**) và đính kèm vào
-**Releases** khi đẩy tag `v*`:
+Bộ cài được build tự động bởi GitHub Actions (**Actions → Build Android & iOS**) và đăng lên
+**Releases**: mỗi lần push cập nhật bản `latest-build` (bản build mới nhất), đẩy tag `v*` tạo bản
+phát hành chính thức:
 
 - `Navig-x.y.z-android.apk` – cài trực tiếp trên Android 7+.
 - `Navig-x.y.z-android.aab` – để đăng Google Play.
