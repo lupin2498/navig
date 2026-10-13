@@ -1,0 +1,231 @@
+name: Build Android & iOS
+
+on:
+  push:
+    branches: [main, master, 'claude/**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'Địa chỉ máy chủ gắn sẵn vào app (tuỳ chọn, vd https://navig.example.com)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.7'
+  SERVER_URL: ${{ github.event.inputs.server_url || vars.SERVER_URL }}
+
+jobs:
+  test:
+    name: Test server & app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Server tests
+        working-directory: server
+        run: |
+          npm ci
+          npm test
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Analyze & test app
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+  android:
+    name: Android APK / AAB
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Release keystore (optional secrets)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Using release keystore from secrets"
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret: signing with the shared keystore in the repo"
+          fi
+      - name: Build
+        working-directory: app
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed -E 's/version: *([^+]*).*/\1/')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          flutter pub get
+          flutter build apk --release --build-number=${{ github.run_number }} --dart-define=SERVER_URL="$SERVER_URL"
+          flutter build appbundle --release --build-number=${{ github.run_number }} --dart-define=SERVER_URL="$SERVER_URL"
+          mkdir -p ../dist
+          cp build/app/outputs/flutter-apk/app-release.apk "../dist/Navig-$VERSION-android.apk"
+          cp build/app/outputs/bundle/release/app-release.aab "../dist/Navig-$VERSION-android.aab"
+          ls -la ../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: navig-android
+          path: dist/*
+          if-no-files-found: error
+
+  ios:
+    name: iOS IPA
+    needs: test
+    runs-on: macos-15
+    env:
+      IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      IOS_EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD || 'ad-hoc' }}
+      IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.navig.navig' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Version
+        working-directory: app
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed -E 's/version: *([^+]*).*/\1/')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p ../dist
+          flutter pub get
+
+      - name: Build unsigned IPA
+        if: env.IOS_CERTIFICATE_P12_BASE64 == '' || env.IOS_PROVISIONING_PROFILE_BASE64 == ''
+        working-directory: app
+        run: |
+          flutter build ios --release --no-codesign --build-number=${{ github.run_number }} --dart-define=SERVER_URL="$SERVER_URL"
+          rm -rf build/ipa-unsigned && mkdir -p build/ipa-unsigned/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ipa-unsigned/Payload/
+          (cd build/ipa-unsigned && zip -qry "../../../dist/Navig-$VERSION-ios-unsigned.ipa" Payload)
+          ls -la ../dist
+
+      - name: Build signed IPA
+        if: env.IOS_CERTIFICATE_P12_BASE64 != '' && env.IOS_PROVISIONING_PROFILE_BASE64 != ''
+        working-directory: app
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/navig.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo "$IOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/profile.plist")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' "$RUNNER_TEMP/profile.plist")
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          if [ "$IOS_EXPORT_METHOD" = "development" ]; then IDENTITY="Apple Development"; else IDENTITY="Apple Distribution"; fi
+
+          # Manual signing for the Runner target only.
+          PBX=ios/Runner.xcodeproj/project.pbxproj
+          perl -0pi -e "s/PRODUCT_BUNDLE_IDENTIFIER = com\.navig\.navig;/PRODUCT_BUNDLE_IDENTIFIER = $IOS_BUNDLE_ID;\n\t\t\t\tDEVELOPMENT_TEAM = $TEAM_ID;\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\t\"CODE_SIGN_IDENTITY[sdk=iphoneos*]\" = \"$IDENTITY\";\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = \"$PROFILE_NAME\";/g" "$PBX"
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>$IOS_EXPORT_METHOD</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>$IDENTITY</string>
+            <key>provisioningProfiles</key>
+            <dict><key>$IOS_BUNDLE_ID</key><string>$PROFILE_UUID</string></dict>
+            <key>compileBitcode</key><false/>
+          </dict>
+          </plist>
+          PLIST
+
+          flutter build ipa --release --build-number=${{ github.run_number }} \
+            --export-options-plist="$RUNNER_TEMP/ExportOptions.plist" \
+            --dart-define=SERVER_URL="$SERVER_URL"
+          cp build/ios/ipa/*.ipa "../dist/Navig-$VERSION-ios.ipa"
+          security delete-keychain "$KEYCHAIN" || true
+          ls -la ../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: navig-ios
+          path: dist/*
+          if-no-files-found: error
+
+  server-image:
+    name: Server Docker image
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/navig-server" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: server
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  release:
+    name: GitHub Release
+    needs: [android, ios]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: docs/RELEASE_NOTES.md

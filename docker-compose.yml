@@ -1,0 +1,13 @@
+services:
+  navig-server:
+    build: ./server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - HISTORY_HOURS=24
+    volumes:
+      - navig-data:/data
+
+volumes:
+  navig-data:

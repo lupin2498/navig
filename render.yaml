@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: navig-server
+    runtime: docker
+    rootDir: server
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: navig-data
+      mountPath: /data
+      sizeGB: 1
