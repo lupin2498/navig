@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
 import '../models.dart';
@@ -139,7 +140,14 @@ class NtfyBackend implements Backend {
   int? _stayStart;
   Timer? _publishTimer;
   bool _publishing = false;
-  bool _stateDirty = false; // profile/sharing/name changed and not yet published
+  bool _rerun = false; // a publish was requested while one was in flight
+  // Profile/sharing/name changes bump the generation; it counts as published
+  // only once a publish that started after the change reached every group.
+  int _stateGen = 0;
+  int _publishedGen = 0;
+  Set<String> _retryTopics = {}; // groups that missed the last publish
+  int _retryGen = -1;
+  int _failures = 0;
 
   // Client-side estimate of the server's daily message quota (UTC days).
   String _sentDay = '';
@@ -162,6 +170,14 @@ class NtfyBackend implements Backend {
   Future<void> _queue = Future.value();
   Timer? _sweepTimer;
   Timer? _saveTimer;
+  Timer? _catchUpTimer;
+
+  /// How long after (re)connecting the cache is polled again.
+  @visibleForTesting
+  Duration catchUpDelay = const Duration(seconds: 45);
+
+  bool get _stateDirty => _stateGen != _publishedGen;
+  void _markDirty() => _stateGen++;
 
   int get _now => _clock().millisecondsSinceEpoch;
 
@@ -284,6 +300,10 @@ class NtfyBackend implements Backend {
       };
     }
     backend._stayStart = (json['stayStart'] as num?)?.toInt();
+    if (json['dirty'] == true) backend._stateGen = 1;
+    for (final id in (json['seen'] as List? ?? const [])) {
+      if (id is String) backend._seen.add(id);
+    }
     backend._sentDay = json['sentDay'] as String? ?? '';
     backend._sentToday = (json['sentToday'] as num?)?.toInt() ?? 0;
     return backend;
@@ -323,6 +343,9 @@ class NtfyBackend implements Backend {
         'stayStart': _stayStart,
         'sentDay': _sentDay,
         'sentToday': _sentToday,
+        'dirty': _stateDirty,
+        // Ids of recent messages, so that a restart does not replay nudges.
+        'seen': _seen.skip(math.max(0, _seen.length - 300)).toList(),
       }),
     );
   }
@@ -387,7 +410,7 @@ class NtfyBackend implements Backend {
       sharing: sharing ?? _user.sharing,
     );
     await _persist();
-    _stateDirty = true;
+    _markDirty();
     await _maybePublish();
     _emit({'type': 'location', 'userId': _user.id, 'location': _myLocation()});
     return _user;
@@ -525,6 +548,10 @@ class NtfyBackend implements Backend {
   /// Publishes the latest location if the policy allows, otherwise schedules
   /// a retry for when it will.
   Future<void> _maybePublish() async {
+    if (_publishing) {
+      _rerun = true;
+      return;
+    }
     _publishTimer?.cancel();
     _publishTimer = null;
     final latest = _user.sharing ? _latest : null;
@@ -537,7 +564,10 @@ class NtfyBackend implements Backend {
     if (last == null || _lastPublished == null || _stateDirty || latest == null) {
       dueAt = now;
     } else {
-      final interval = moving ? policy.movingInterval : policy.stationaryInterval;
+      var interval = moving ? policy.movingInterval : policy.stationaryInterval;
+      // ntfy refills one request every 5 s; every group costs one request.
+      final floor = Duration(seconds: 6 * _groups.length);
+      if (interval < floor) interval = floor;
       dueAt = last.add(interval);
       final prev = _lastPublished!;
       final moved = distanceBetween(
@@ -642,7 +672,8 @@ class NtfyBackend implements Backend {
     final usable = remaining - math.min(policy.reserve, limit ~/ 10);
     if (usable < groups) return midnight;
     final secondsLeft = math.max(1, midnight.difference(now).inSeconds);
-    final heartbeatsNeeded = (secondsLeft / policy.stationaryInterval.inSeconds).ceil() * groups;
+    final heartbeatsNeeded =
+        (secondsLeft / math.max(1, policy.stationaryInterval.inSeconds)).ceil() * groups;
     if (moving && usable - groups >= heartbeatsNeeded) return now;
     final pace = Duration(seconds: (secondsLeft * groups / usable).ceil());
     final last = _lastPublishedAt;
@@ -657,26 +688,51 @@ class NtfyBackend implements Backend {
       };
 
   Future<void> _publishState() async {
-    if (_publishing) return;
+    if (_publishing) {
+      _rerun = true;
+      return;
+    }
     _publishing = true;
     try {
+      final gen = _stateGen;
       final payload = _statePayload();
-      var ok = true;
-      for (final g in _groups.values.toList()) {
-        ok = await _publish(g, payload) && ok;
+      final retryOnly = _retryTopics.isNotEmpty && _retryGen == gen;
+      final targets = [
+        for (final g in _groups.values)
+          if (!retryOnly || _retryTopics.contains(g.topic)) g,
+      ];
+      final failed = <String>{};
+      for (final g in targets) {
+        if (!await _publish(g, payload)) failed.add(g.topic);
       }
-      if (ok) {
-        _stateDirty = false;
+      if (failed.isEmpty) {
+        _failures = 0;
+        _retryTopics = {};
+        _publishedGen = gen;
         _lastPublishedAt = _clock();
         _lastPublished = _latest == null ? null : Map.of(_latest!);
         await _persist();
       } else {
-        _stateDirty = true;
+        // Retry only the groups that missed it, with growing delays.
+        _retryTopics = failed;
+        final changedMeanwhile = _stateGen != gen;
+        if (!_stateDirty) _markDirty(); // we still owe these groups an update
+        _retryGen = changedMeanwhile ? -1 : _stateGen;
+        _failures++;
+        final now = _clock();
+        final wait = Duration(seconds: math.min(300, 15 << math.min(_failures, 5)));
+        final backoff = _backoffUntil;
+        if (backoff == null || backoff.isBefore(now.add(wait))) _backoffUntil = now.add(wait);
         _publishTimer?.cancel();
-        _publishTimer = Timer(const Duration(minutes: 1), _kick);
+        _publishTimer = Timer(_backoffUntil!.difference(now), _kick);
+        _persistSoon();
       }
     } finally {
       _publishing = false;
+      if (_rerun) {
+        _rerun = false;
+        _kick();
+      }
     }
   }
 
@@ -685,7 +741,7 @@ class NtfyBackend implements Backend {
       await _publish(group, _statePayload());
     } catch (_) {
       // Offline: the next heartbeat will carry the same information.
-      _stateDirty = true;
+      _markDirty();
     }
   }
 
@@ -713,18 +769,16 @@ class NtfyBackend implements Backend {
       if (res.statusCode == 401 || res.statusCode == 403) {
         throw const ApiException(401, 'Máy chủ ntfy từ chối (cần token truy cập?)');
       }
-      if (res.statusCode >= 400) return false;
+      // Anything but 2xx (e.g. a redirect a POST does not follow) failed.
+      if (res.statusCode < 200 || res.statusCode >= 300) return false;
       _rollDay(_clock());
       _sentToday++;
       _rememberId(res.body);
       return true;
     } on ApiException {
       rethrow;
-    } on TimeoutException {
-      return false;
-    } on SocketException {
-      return false;
-    } on http.ClientException {
+    } catch (_) {
+      // Timeouts, offline, TLS errors behind captive portals...
       return false;
     }
   }
@@ -907,12 +961,36 @@ class NtfyBackend implements Backend {
     _realtime = RealtimeClient(
       _wsUri,
       headers: _headers,
-      onStatus: onStatus,
+      onStatus: (connected) {
+        onStatus(connected);
+        if (connected) _scheduleCatchUp();
+      },
       onMessage: (event) {
         if (event['event'] != 'message') return;
         _queue = _queue.then((_) => _handleEvent(event, live: true)).catchError((Object _) {});
       },
     )..connect();
+  }
+
+  /// ntfy (notably ntfy.sh) writes messages to its cache a little after
+  /// delivering them live, so messages sent while we were reconnecting may be
+  /// missing from the replay. Poll the cache again shortly after connecting.
+  void _scheduleCatchUp() {
+    _catchUpTimer?.cancel();
+    final since = _since == null ? '${policy.cacheHours}h' : '${_since! - 90}';
+    _catchUpTimer = Timer(catchUpDelay, () async {
+      if (_groups.isEmpty) return;
+      try {
+        final events = await _poll(_groups.keys.toList(), since: since);
+        _queue = _queue.then((_) async {
+          for (final e in events) {
+            await _handleEvent(e, live: false);
+          }
+        }).catchError((Object _) {});
+      } catch (_) {
+        // Next reconnect or heartbeat will catch up.
+      }
+    });
   }
 
   Future<void> _handleEvent(Map<String, dynamic> event, {required bool live}) async {
@@ -1020,7 +1098,7 @@ class NtfyBackend implements Backend {
   }
 
   void _welcome() {
-    _stateDirty = true;
+    _markDirty();
     _publishTimer?.cancel();
     _publishTimer = Timer(Duration(milliseconds: 300 + math.Random().nextInt(2000)), _kick);
   }
@@ -1063,6 +1141,8 @@ class NtfyBackend implements Backend {
     _publishTimer = null;
     _sweepTimer?.cancel();
     _sweepTimer = null;
+    _catchUpTimer?.cancel();
+    _catchUpTimer = null;
     _onMessage = null;
     _onStatus = null;
     if (_saveTimer != null) _persist();

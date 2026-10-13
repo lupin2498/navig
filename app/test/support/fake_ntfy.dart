@@ -18,9 +18,30 @@ class FakeNtfy {
   int? rejectAfter;
   int rejectCode = 42901;
 
-  /// When set, GET /v1/account reports this quota (like ntfy.sh does).
-  int? accountLimit;
+  /// GET /v1/account reports this quota, like a default self-hosted ntfy
+  /// (86400 / 5 messages a day). Set [accountRemaining] to simulate others
+  /// behind the same IP having used part of it.
+  int? accountLimit = 17280;
   int? accountRemaining;
+
+  /// Delay before answering publishes (slow mobile network).
+  Duration postDelay = Duration.zero;
+
+  /// Answer publishes with a redirect, like an http->https proxy.
+  bool redirectPosts = false;
+
+  /// Deliver live first and write to the cache later, like ntfy.sh does.
+  Duration cacheDelay = Duration.zero;
+
+  void resetBehaviour() {
+    accountLimit = 17280;
+    accountRemaining = null;
+    postDelay = Duration.zero;
+    redirectPosts = false;
+    cacheDelay = Duration.zero;
+    rejectAfter = null;
+    rejectCode = 42901;
+  }
   int publishCount = 0;
   int rejected = 0;
 
@@ -78,11 +99,21 @@ class FakeNtfy {
         return await _json(req.response, {
           'basis': 'ip',
           'limits': {'basis': 'ip', 'messages': accountLimit, 'messages_expiry_duration': 43200},
-          'stats': {'messages': accountLimit! - (accountRemaining ?? accountLimit!), 'messages_remaining': accountRemaining},
+          'stats': {
+            'messages': accountLimit! - (accountRemaining ?? accountLimit! - publishCount),
+            'messages_remaining': accountRemaining ?? accountLimit! - publishCount,
+          },
         });
       }
       if (segments.length == 1 && req.method == 'POST') {
         final topic = segments.first;
+        if (postDelay > Duration.zero) await Future<void>.delayed(postDelay);
+        if (redirectPosts) {
+          await req.drain<void>();
+          req.response.statusCode = 308;
+          req.response.headers.set('Location', 'https://example.invalid/$topic');
+          return await req.response.close();
+        }
         publishCount++;
         if (rejectAfter != null && publishCount > rejectAfter!) {
           rejected++;
@@ -98,7 +129,11 @@ class FakeNtfy {
           'topic': topic,
           'message': body,
         };
-        messages.add(message);
+        if (cacheDelay > Duration.zero) {
+          Future<void>.delayed(cacheDelay, () => messages.add(message));
+        } else {
+          messages.add(message);
+        }
         final frame = jsonEncode(message);
         for (final (topics, ws) in _subscribers) {
           if (topics.contains(topic)) ws.add(frame);

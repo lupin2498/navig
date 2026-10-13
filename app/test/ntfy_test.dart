@@ -116,6 +116,7 @@ void main() {
     });
 
     tearDownAll(() async => fake?.close());
+    tearDown(() => fake?.resetBehaviour());
 
     test('probe detects ntfy servers', () async {
       expect(await NtfyBackend.probe(url), isTrue);
@@ -197,7 +198,9 @@ void main() {
       // History from the server cache.
       await bob.backend.postLocations([point(21.04, 105.86, speed: 0)]);
       await waitFor(
-        () => alice.ofType('location').where((e) => e['userId'] == bob.backend.user.id).length >= 2,
+        () => alice
+            .ofType('location')
+            .any((e) => e['userId'] == bob.backend.user.id && (e['location'] as Map?)?['lat'] == 21.04),
         reason: 'second location',
       );
       final trail = await alice.backend.history(bob.backend.user.id, hours: 24);
@@ -229,7 +232,7 @@ void main() {
       expect(() => alice.backend.removeMember(groupId, 'x'), throwsA(anything));
       alice.backend.close();
       bob.backend.close();
-    });
+    }, timeout: const Timeout(Duration(minutes: 4)));
 
     test('invalid codes are rejected', () async {
       final backend = await NtfyBackend.register(url, MemoryStore(),
@@ -321,6 +324,88 @@ void main() {
       backend.close();
     });
 
+    test('pausing during an in-flight publish is not lost', () async {
+      if (fake == null) return;
+      final alice = Client(await NtfyBackend.register(url, MemoryStore(),
+          name: 'A', color: '#FF4D6D', emoji: '', policy: fast));
+      final bob = Client(await NtfyBackend.register(url, MemoryStore(),
+          name: 'B', color: '#3A86FF', emoji: '', policy: fast));
+      final g = await alice.backend.createGroup('Pause');
+      await bob.backend.joinGroup(g['code'] as String);
+      await waitFor(() => alice.connected && bob.connected, reason: 'connected');
+
+      fake!.postDelay = const Duration(milliseconds: 800);
+      final inFlight = bob.backend.postLocations([point(5, 5)]);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await bob.backend.updateMe(sharing: false);
+      await inFlight;
+      fake!.postDelay = Duration.zero;
+      await waitFor(
+        () => alice.ofType('location').any((e) => e['userId'] == bob.backend.user.id && e['location'] == null),
+        reason: 'pause reaches alice',
+      );
+      alice.backend.close();
+      bob.backend.close();
+    });
+
+    test('a redirect is not counted as published', () async {
+      if (fake == null) return;
+      final backend = await NtfyBackend.register(url, MemoryStore(),
+          name: 'R', color: '#FF4D6D', emoji: '', policy: fast);
+      backend.connect(onMessage: (_) {}, onStatus: (_) {});
+      await backend.createGroup('Redirect');
+      final sent = backend.usage.sent;
+      fake!.redirectPosts = true;
+      await backend.postLocations([point(1, 1)]);
+      expect(backend.usage.sent, sent);
+      backend.close();
+    });
+
+    test('nudges are not shown again after a restart', () async {
+      if (fake == null) return;
+      final aliceStore = MemoryStore();
+      final alice = Client(await NtfyBackend.register(url, aliceStore,
+          name: 'A', color: '#FF4D6D', emoji: '', policy: fast));
+      final bob = Client(await NtfyBackend.register(url, MemoryStore(),
+          name: 'B', color: '#3A86FF', emoji: '', policy: fast));
+      final g = await alice.backend.createGroup('Nudge');
+      await bob.backend.joinGroup(g['code'] as String);
+      await waitFor(() => alice.connected && bob.connected, reason: 'connected');
+      await bob.backend.nudge(alice.backend.user.id, 'hi');
+      await waitFor(() => alice.ofType('nudge').isNotEmpty, reason: 'nudge');
+      alice.backend.close();
+      await Future<void>.delayed(const Duration(seconds: 3)); // let the state be saved
+
+      final restored = Client((await NtfyBackend.restore(aliceStore, policy: fast))!);
+      await waitFor(() => restored.connected, reason: 'reconnected');
+      await Future<void>.delayed(const Duration(seconds: 1));
+      expect(restored.ofType('nudge'), isEmpty);
+      restored.backend.close();
+      bob.backend.close();
+    });
+
+    test('catches up on messages the cache wrote late', () async {
+      if (fake == null) return;
+      final alice = Client(await NtfyBackend.register(url, MemoryStore(),
+          name: 'A', color: '#FF4D6D', emoji: '', policy: fast)
+        ..catchUpDelay = const Duration(seconds: 2));
+      final bob = Client(await NtfyBackend.register(url, MemoryStore(),
+          name: 'B', color: '#3A86FF', emoji: '', policy: fast));
+      final g = await alice.backend.createGroup('Late cache');
+      await bob.backend.joinGroup(g['code'] as String);
+      await waitFor(() => alice.connected && bob.connected, reason: 'connected');
+
+      fake!.cacheDelay = const Duration(milliseconds: 1500);
+      await fake!.dropConnections();
+      await bob.backend.nudge(alice.backend.user.id, 'during the drop');
+      await waitFor(
+        () => alice.ofType('nudge').any((e) => e['message'] == 'during the drop'),
+        reason: 'nudge recovered by the catch-up poll',
+      );
+      alice.backend.close();
+      bob.backend.close();
+    });
+
     test('catches up after a dropped connection', () async {
       if (fake == null) return;
       final alice = Client(await NtfyBackend.register(url, MemoryStore(),
@@ -365,7 +450,7 @@ void main() {
       expect(state.isLoggedIn, isFalse);
       expect(prefs.getString(NtfyBackend.storeKey), isNull);
       friend.backend.close();
-    });
+    }, timeout: const Timeout(Duration(minutes: 4)));
   });
 }
 

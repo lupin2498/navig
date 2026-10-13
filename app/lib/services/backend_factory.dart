@@ -32,17 +32,23 @@ Future<Backend> createAccount({
   required KeyValueStore store,
   String? ntfyToken,
 }) async {
-  final url = ApiClient.normalizeBaseUrl(server);
-  if (url.isEmpty) throw const ApiException(0, 'Vui lòng nhập địa chỉ máy chủ');
-  final navig = ApiClient(url);
-  final detected = await Future.wait([navig.isNavigServer(), NtfyBackend.probe(url)]);
-  if (detected[0]) {
-    final (token, _) = await navig.register(name: name, color: color, emoji: emoji);
-    navig.token = token;
-    return navig;
+  final input = server.trim();
+  if (input.isEmpty) throw const ApiException(0, 'Vui lòng nhập địa chỉ máy chủ');
+  // Without a scheme prefer HTTPS: a POST is not redirected from http://.
+  final candidates = input.contains('://')
+      ? [ApiClient.normalizeBaseUrl(input)]
+      : [ApiClient.normalizeBaseUrl('https://$input'), ApiClient.normalizeBaseUrl('http://$input')];
+  for (final url in candidates) {
+    final navig = ApiClient(url);
+    final detected = await Future.wait([navig.isNavigServer(), NtfyBackend.probe(url)]);
+    if (detected[0]) {
+      final (token, _) = await navig.register(name: name, color: color, emoji: emoji);
+      navig.token = token;
+      return navig;
+    }
+    if (detected[1]) {
+      return NtfyBackend.register(url, store, name: name, color: color, emoji: emoji, token: ntfyToken);
+    }
   }
-  if (detected[1]) {
-    return NtfyBackend.register(url, store, name: name, color: color, emoji: emoji, token: ntfyToken);
-  }
-  throw ApiException(0, 'Không kết nối được, hoặc $url không phải máy chủ Navig/ntfy');
+  throw ApiException(0, 'Không kết nối được, hoặc $input không phải máy chủ Navig/ntfy');
 }
