@@ -245,7 +245,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> logout({bool deleteAccount = false}) async {
-    if (deleteAccount) await _api?.deleteMe();
+    // An ntfy identity only lives on this phone, so logging out also tells
+    // the groups that we left (otherwise friends would keep a stale member).
+    if (deleteAccount || _api?.kind == BackendKind.ntfy) await _api?.deleteMe();
     await _clearSession();
   }
 
