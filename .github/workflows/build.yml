@@ -50,9 +50,46 @@ jobs:
           flutter analyze
           flutter test
 
+  ntfy:
+    name: ntfy integration (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [self-hosted, ntfy.sh]
+    # The public server is shared and rate limited: report, but do not block builds.
+    continue-on-error: ${{ matrix.target == 'ntfy.sh' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Start ntfy server
+        if: matrix.target == 'self-hosted'
+        run: |
+          docker run -d --name ntfy -p 8080:80 binwiederhier/ntfy serve
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/v1/health && break
+            sleep 1
+          done
+          echo "NTFY_URL=http://localhost:8080" >> "$GITHUB_ENV"
+      - name: Use ntfy.sh
+        if: matrix.target == 'ntfy.sh'
+        run: echo "NTFY_URL=https://ntfy.sh" >> "$GITHUB_ENV"
+      - name: Run ntfy tests against ${{ matrix.target }}
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter test test/ntfy_test.dart
+      - name: ntfy logs
+        if: failure() && matrix.target == 'self-hosted'
+        run: docker logs ntfy
+
   android:
     name: Android APK / AAB
-    needs: test
+    needs: [test, ntfy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +137,7 @@ jobs:
 
   ios:
     name: iOS IPA
-    needs: test
+    needs: [test, ntfy]
     runs-on: macos-15
     env:
       IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}

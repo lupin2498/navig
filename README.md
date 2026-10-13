@@ -22,6 +22,30 @@ mở rộng từ "cặp đôi" thành **nhóm bạn bè**: mọi thành viên th
 | Ngoại tuyến | Điểm vị trí được xếp hàng khi mất mạng và gửi lại khi có kết nối |
 | Quyền riêng tư | Chỉ thành viên cùng nhóm thấy vị trí; xoá tài khoản xoá toàn bộ dữ liệu |
 
+## Máy chủ: ntfy.sh hoặc máy chủ riêng
+
+App tự nhận diện loại máy chủ từ địa chỉ nhập vào (mặc định **https://ntfy.sh**):
+
+| | **ntfy.sh** (mặc định) | **ntfy tự dựng** | **Máy chủ Navig** (`server/`) |
+|---|---|---|---|
+| Cần dựng máy chủ | Không | Có (1 lệnh Docker) | Có (1 lệnh Docker) |
+| Mã hoá | Đầu-cuối AES-256-GCM, máy chủ không đọc được | Đầu-cuối | TLS tới máy chủ của bạn |
+| Mã mời | 16 ký tự, vd `7K2M-QX9D-0RTB-4HVA` | 16 ký tự | 6 ký tự |
+| Tần suất cập nhật | 1 phút/lần khi di chuyển, 15 phút/lần khi đứng yên | 10 giây / 3 phút | Liên tục |
+| Giới hạn | 250 tin/ngày cho mỗi địa chỉ IP (reset 0h UTC = 7h sáng VN) | Mặc định ~17.000 tin/ngày | Không |
+| Lộ trình | 12 giờ | 12 giờ | 24 giờ |
+| Trưởng nhóm xoá thành viên / đổi mã | Không (tạo nhóm mới) | Không | Có |
+
+Với ntfy, mỗi nhóm là một topic ngẫu nhiên suy ra từ mã mời; mọi vị trí, tên, pin… được mã hoá
+bằng khoá cũng suy ra từ mã mời, nên chỉ ai có mã mới đọc được. ntfy.sh là dịch vụ công cộng miễn
+phí, không cam kết uptime; nhiều máy dùng chung một IP (4G/CGNAT, cùng Wi-Fi) sẽ chia nhau hạn mức
+250 tin/ngày. Cần ổn định hơn thì tự dựng ntfy:
+
+```bash
+docker run -d --name ntfy -p 80:80 --restart unless-stopped binwiederhier/ntfy serve
+# rồi nhập http://<ip-may-chu> (hoặc tên miền HTTPS) vào ô "Địa chỉ máy chủ"
+```
+
 ## Cấu trúc
 
 ```
@@ -30,7 +54,7 @@ server/   Máy chủ Node.js: REST API + WebSocket, lưu dữ liệu vào file J
 .github/workflows/build.yml   CI: test, build APK/AAB/IPA, Docker image, GitHub Release
 ```
 
-## 1. Dựng máy chủ
+## 1. Dựng máy chủ Navig (tuỳ chọn – không cần nếu dùng ntfy.sh)
 
 Cả nhóm dùng chung một máy chủ. Chọn một cách:
 
@@ -68,9 +92,9 @@ phát hành chính thức:
 - `Navig-x.y.z-ios.ipa` – iOS đã ký (khi cấu hình secrets bên dưới).
 
 ### Gắn sẵn địa chỉ máy chủ vào app
-Đặt biến repo **Settings → Secrets and variables → Actions → Variables → `SERVER_URL`**
-(vd `https://navig.example.com`), hoặc nhập khi chạy workflow thủ công. Khi đó người dùng không cần
-gõ địa chỉ máy chủ.
+Mặc định app dùng `https://ntfy.sh`. Muốn gắn máy chủ khác, đặt biến repo **Settings → Secrets and
+variables → Actions → Variables → `SERVER_URL`** (vd `https://navig.example.com` hoặc
+`https://ntfy.example.com`), hoặc nhập khi chạy workflow thủ công.
 
 ### Ký bản phát hành (tuỳ chọn)
 | Secret / Variable | Dùng cho |
@@ -93,7 +117,8 @@ flutter build ipa --release --dart-define=SERVER_URL=https://navig.example.com  
 
 ```bash
 cd server && npm test                 # test API + WebSocket
-cd app && flutter analyze && flutter test   # gồm test end-to-end app ↔ máy chủ thật
+cd app && flutter analyze && flutter test   # gồm test end-to-end app ↔ máy chủ Navig & ntfy giả lập
+NTFY_URL=http://localhost:8080 flutter test test/ntfy_test.dart   # chạy với ntfy thật
 ```
 
 Bản đồ dùng tile OpenStreetMap (không cần API key); đổi nguồn tile bằng `--dart-define=TILE_URL=...`.

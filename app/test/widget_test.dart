@@ -20,7 +20,8 @@ void main() {
 
     expect(find.textContaining('Chào mừng'), findsOneWidget);
     expect(find.text('Bắt đầu'), findsOneWidget);
-    expect(find.text('Địa chỉ máy chủ'), findsOneWidget);
+    expect(find.text('Nâng cao'), findsOneWidget);
+    expect(find.text('Máy chủ: https://ntfy.sh'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Bắt đầu'));
     await tester.tap(find.text('Bắt đầu'));

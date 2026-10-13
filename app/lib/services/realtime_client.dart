@@ -4,11 +4,18 @@ import 'dart:math' as math;
 
 import 'package:web_socket_channel/io.dart';
 
-/// WebSocket connection to the server with automatic reconnect.
+/// WebSocket connection with automatic reconnect. The URL is rebuilt on every
+/// (re)connect so callers can refresh query parameters such as `since`.
 class RealtimeClient {
-  RealtimeClient(this.uri, {required this.onMessage, required this.onStatus});
+  RealtimeClient(
+    this.uriBuilder, {
+    required this.onMessage,
+    required this.onStatus,
+    this.headers,
+  });
 
-  final Uri uri;
+  final Uri Function() uriBuilder;
+  final Map<String, dynamic>? headers;
   final void Function(Map<String, dynamic> message) onMessage;
   final void Function(bool connected) onStatus;
 
@@ -25,7 +32,8 @@ class RealtimeClient {
     _connecting = true;
     _retryTimer?.cancel();
     final channel = IOWebSocketChannel.connect(
-      uri,
+      uriBuilder(),
+      headers: headers,
       pingInterval: const Duration(seconds: 20),
       connectTimeout: const Duration(seconds: 15),
     );

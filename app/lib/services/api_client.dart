@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import '../models.dart';
+import 'backend.dart';
+import 'realtime_client.dart';
 
 class ApiException implements Exception {
   const ApiException(this.status, this.message);
@@ -16,14 +18,28 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-class ApiClient {
+/// Client for the Navig server in `server/`.
+class ApiClient implements Backend {
   ApiClient(String baseUrl, {this.token, http.Client? client})
       : baseUrl = normalizeBaseUrl(baseUrl),
         _client = client ?? http.Client();
 
+  @override
   final String baseUrl;
   String? token;
   final http.Client _client;
+  RealtimeClient? _realtime;
+
+  @override
+  BackendKind get kind => BackendKind.navig;
+
+  @override
+  BackendFeatures get features => const BackendFeatures(
+        removeMembers: true,
+        regenerateCode: true,
+        historyHours: 24,
+        deliveryReceipts: true,
+      );
 
   static const _timeout = Duration(seconds: 15);
 
@@ -87,6 +103,15 @@ class ApiClient {
     return json;
   }
 
+  Future<bool> isNavigServer() async {
+    try {
+      await health();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> health() async {
     final res = await _send('GET', '/health');
     if (res['service'] != 'navig') {
@@ -107,8 +132,10 @@ class ApiClient {
     return (res['token'] as String, AppUser.fromJson(res['user'] as Map<String, dynamic>));
   }
 
+  @override
   Future<Map<String, dynamic>> me() => _send('GET', '/api/me');
 
+  @override
   Future<AppUser> updateMe({String? name, String? color, String? emoji, bool? sharing}) async {
     final res = await _send('PATCH', '/api/me', body: {
       'name': ?name,
@@ -119,30 +146,38 @@ class ApiClient {
     return AppUser.fromJson(res['user'] as Map<String, dynamic>);
   }
 
+  @override
   Future<void> deleteMe() => _send('DELETE', '/api/me');
 
+  @override
   Future<Map<String, dynamic>> createGroup(String name) async =>
       (await _send('POST', '/api/groups', body: {'name': name}))['group'] as Map<String, dynamic>;
 
+  @override
   Future<Map<String, dynamic>> joinGroup(String code) async =>
       (await _send('POST', '/api/groups/join', body: {'code': code}))['group']
           as Map<String, dynamic>;
 
+  @override
   Future<Map<String, dynamic>> updateGroup(String id, {String? name, bool regenerateCode = false}) async =>
       (await _send('PATCH', '/api/groups/$id', body: {
         'name': ?name,
         if (regenerateCode) 'regenerateCode': true,
       }))['group'] as Map<String, dynamic>;
 
+  @override
   Future<void> leaveGroup(String id) => _send('POST', '/api/groups/$id/leave');
 
+  @override
   Future<Map<String, dynamic>> removeMember(String groupId, String userId) async =>
       (await _send('DELETE', '/api/groups/$groupId/members/$userId'))['group']
           as Map<String, dynamic>;
 
+  @override
   Future<void> postLocations(List<Map<String, dynamic>> points) =>
       _send('POST', '/api/location', body: {'points': points});
 
+  @override
   Future<List<HistoryPoint>> history(String userId, {int hours = 24}) async {
     final res = await _send('GET', '/api/users/$userId/history', query: {'hours': '$hours'});
     return [
@@ -151,8 +186,27 @@ class ApiClient {
     ];
   }
 
+  @override
   Future<bool> nudge(String userId, String message) async {
     final res = await _send('POST', '/api/users/$userId/nudge', body: {'message': message});
     return res['delivered'] == true;
+  }
+
+  @override
+  void connect({
+    required void Function(Map<String, dynamic> message) onMessage,
+    required void Function(bool connected) onStatus,
+  }) {
+    _realtime?.close();
+    _realtime = RealtimeClient(wsUri, onMessage: onMessage, onStatus: onStatus)..connect();
+  }
+
+  @override
+  void reconnectNow() => _realtime?.reconnectNow();
+
+  @override
+  void close() {
+    _realtime?.close();
+    _realtime = null;
   }
 }

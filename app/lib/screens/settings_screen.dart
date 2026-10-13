@@ -3,7 +3,9 @@ import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 
 import '../config.dart';
+import '../services/backend.dart';
 import '../services/location_tracker.dart';
+import '../services/ntfy_backend.dart';
 import '../state/app_state.dart';
 import '../widgets/avatar.dart';
 import '../widgets/profile_editor.dart';
@@ -67,18 +69,35 @@ class SettingsScreen extends StatelessWidget {
           const Divider(),
           ListTile(
             leading: Icon(state.connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined),
-            title: const Text('Máy chủ'),
+            title: Text(state.backend?.kind == BackendKind.ntfy ? 'Máy chủ ntfy' : 'Máy chủ Navig'),
             subtitle: Text('${state.serverUrl ?? '-'}\n${state.connected ? 'Đã kết nối' : 'Đang kết nối lại…'}'),
             isThreeLine: true,
           ),
+          if (state.backend case final NtfyBackend ntfy)
+            ListTile(
+              isThreeLine: true,
+              leading: const Icon(Icons.lock_outline),
+              title: const Text('Mã hoá đầu-cuối'),
+              subtitle: Text(
+                'Vị trí được mã hoá AES-256 bằng mã mời; máy chủ ntfy không đọc được. '
+                'Cập nhật khi di chuyển: ~${ntfy.policy.movingInterval.inSeconds} giây/lần, '
+                'khi đứng yên: ${ntfy.policy.stationaryInterval.inMinutes} phút/lần.'
+                '${ntfy.usage.limit == null ? '' : '\nHôm nay đã gửi ${ntfy.usage.sent}/${ntfy.usage.limit} tin '
+                    '(hạn mức miễn phí của ntfy.sh theo địa chỉ IP, đặt lại lúc 7:00 giờ Việt Nam).'}',
+              ),
+            ),
           ListTile(
             leading: const Icon(Icons.logout),
             title: const Text('Đăng xuất'),
-            subtitle: const Text('Dữ liệu trên máy chủ vẫn được giữ'),
+            subtitle: Text(state.backend?.kind == BackendKind.ntfy
+                ? 'Rời các nhóm trên máy này'
+                : 'Dữ liệu trên máy chủ vẫn được giữ'),
             onTap: () => _confirm(
               context,
               title: 'Đăng xuất?',
-              message: 'Bạn sẽ cần tạo hồ sơ mới và tham gia lại các nhóm.',
+              message: state.backend?.kind == BackendKind.ntfy
+                  ? 'Hồ sơ và các nhóm trên máy này sẽ bị xoá. Bạn cần mã mời để vào lại nhóm.'
+                  : 'Bạn sẽ cần tạo hồ sơ mới và tham gia lại các nhóm.',
               action: 'Đăng xuất',
               run: () => state.logout(),
             ),
@@ -86,7 +105,9 @@ class SettingsScreen extends StatelessWidget {
           ListTile(
             leading: Icon(Icons.delete_forever_outlined, color: theme.colorScheme.error),
             title: Text('Xoá tài khoản', style: TextStyle(color: theme.colorScheme.error)),
-            subtitle: const Text('Xoá hồ sơ, vị trí và lịch sử di chuyển khỏi máy chủ'),
+            subtitle: Text(state.backend?.kind == BackendKind.ntfy
+                ? 'Báo rời mọi nhóm và xoá dữ liệu trên máy này'
+                : 'Xoá hồ sơ, vị trí và lịch sử di chuyển khỏi máy chủ'),
             onTap: () => _confirm(
               context,
               title: 'Xoá tài khoản?',

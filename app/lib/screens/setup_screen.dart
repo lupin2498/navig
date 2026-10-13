@@ -16,6 +16,7 @@ class SetupScreen extends StatefulWidget {
 
 class _SetupScreenState extends State<SetupScreen> {
   final _name = TextEditingController();
+  final _token = TextEditingController();
   late final TextEditingController _server;
   String _emoji = '😎';
   String _color = profileColors.first;
@@ -32,6 +33,7 @@ class _SetupScreenState extends State<SetupScreen> {
   @override
   void dispose() {
     _name.dispose();
+    _token.dispose();
     _server.dispose();
     super.dispose();
   }
@@ -52,6 +54,7 @@ class _SetupScreenState extends State<SetupScreen> {
             name: name,
             color: _color,
             emoji: _emoji,
+            ntfyToken: _token.text,
           );
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
@@ -104,14 +107,12 @@ class _SetupScreenState extends State<SetupScreen> {
                     onColorChanged: (v) => setState(() => _color = v),
                   ),
                   const SizedBox(height: 16),
-                  if (kDefaultServerUrl.isEmpty)
-                    _serverField()
-                  else
-                    ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      title: const Text('Nâng cao'),
-                      children: [_serverField()],
-                    ),
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text('Nâng cao'),
+                    subtitle: Text('Máy chủ: ${_server.text.isEmpty ? '-' : _server.text}'),
+                    children: [_serverField(), _tokenField()],
+                  ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
                     Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
@@ -137,16 +138,34 @@ class _SetupScreenState extends State<SetupScreen> {
   }
 
   Widget _serverField() => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
           controller: _server,
           keyboardType: TextInputType.url,
           autocorrect: false,
+          onChanged: (_) => setState(() {}),
           decoration: const InputDecoration(
             labelText: 'Địa chỉ máy chủ',
-            hintText: 'vd: https://navig.example.com',
-            helperText: 'Máy chủ Navig mà cả nhóm cùng dùng',
+            hintText: 'https://ntfy.sh',
+            helperText: 'ntfy.sh (miễn phí, không cần máy chủ riêng), ntfy tự dựng\nhoặc máy chủ Navig. Cả nhóm phải dùng cùng một máy chủ.',
+            helperMaxLines: 3,
             prefixIcon: Icon(Icons.dns_outlined),
+            border: OutlineInputBorder(),
+          ),
+        ),
+      );
+
+  Widget _tokenField() => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: TextField(
+          controller: _token,
+          autocorrect: false,
+          decoration: const InputDecoration(
+            labelText: 'Access token ntfy (tuỳ chọn)',
+            hintText: 'tk_...',
+            helperText: 'Chỉ cần khi dùng tài khoản ntfy trả phí hoặc máy chủ ntfy có đăng nhập',
+            helperMaxLines: 2,
+            prefixIcon: Icon(Icons.key_outlined),
             border: OutlineInputBorder(),
           ),
         ),

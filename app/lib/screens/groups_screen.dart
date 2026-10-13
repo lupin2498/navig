@@ -24,9 +24,10 @@ Future<String?> _askText(
       content: TextField(
         controller: controller,
         autofocus: true,
-        maxLength: code ? 6 : 50,
+        maxLength: code ? 24 : 50,
+        autocorrect: !code,
         textCapitalization: code ? TextCapitalization.characters : TextCapitalization.sentences,
-        style: code ? const TextStyle(letterSpacing: 6, fontSize: 22, fontWeight: FontWeight.w700) : null,
+        style: code ? const TextStyle(letterSpacing: 2, fontSize: 18, fontWeight: FontWeight.w700) : null,
         decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
         onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
       ),
@@ -66,7 +67,7 @@ Future<void> showJoinGroupDialog(BuildContext context) async {
   final code = await _askText(
     context,
     title: 'Tham gia nhóm',
-    label: 'Mã mời 6 ký tự',
+    label: 'Mã mời',
     action: 'Tham gia',
     code: true,
   );
@@ -83,7 +84,7 @@ String inviteText(Group group, String? serverUrl) {
   final buffer = StringBuffer()
     ..writeln('Tham gia nhóm "${group.name}" trên $kAppName để cùng chia sẻ vị trí nhé!')
     ..writeln('Mã mời: ${group.code}');
-  if (kDefaultServerUrl.isEmpty && serverUrl != null) buffer.writeln('Máy chủ: $serverUrl');
+  if (serverUrl != null && serverUrl != kDefaultServerUrl) buffer.writeln('Máy chủ: $serverUrl');
   return buffer.toString().trim();
 }
 
@@ -173,7 +174,8 @@ class _GroupCard extends StatelessWidget {
                   onSelected: (v) => _onMenu(context, state, v),
                   itemBuilder: (_) => [
                     const PopupMenuItem(value: 'rename', child: Text('Đổi tên nhóm')),
-                    if (isOwner) const PopupMenuItem(value: 'code', child: Text('Tạo mã mời mới')),
+                    if (isOwner && state.features.regenerateCode)
+                      const PopupMenuItem(value: 'code', child: Text('Tạo mã mời mới')),
                     const PopupMenuItem(value: 'leave', child: Text('Rời nhóm')),
                   ],
                 ),
@@ -198,18 +200,24 @@ class _GroupCard extends StatelessWidget {
             const SizedBox(height: 10),
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    group.code,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      letterSpacing: 4,
-                      fontWeight: FontWeight.w800,
-                      color: theme.colorScheme.onPrimaryContainer,
+                Flexible(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primaryContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: SelectableText(
+                        group.code,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          letterSpacing: group.code.length > 8 ? 1 : 4,
+                          fontWeight: FontWeight.w800,
+                          color: theme.colorScheme.onPrimaryContainer,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -227,7 +235,6 @@ class _GroupCard extends StatelessWidget {
                   icon: const Icon(Icons.share),
                   onPressed: () => shareInvite(group, serverUrl: state.serverUrl),
                 ),
-                const Spacer(),
                 if (!selected)
                   TextButton(
                     onPressed: () {

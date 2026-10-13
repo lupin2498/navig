@@ -1,6 +1,9 @@
 /// Build-time configuration. Override with
 /// `flutter build apk --dart-define=SERVER_URL=https://your-server`.
-const String kDefaultServerUrl = String.fromEnvironment('SERVER_URL');
+/// Either a Navig server (`server/`) or any ntfy server; the public
+/// https://ntfy.sh works out of the box.
+const String kDefaultServerUrl = _serverDefine == '' ? 'https://ntfy.sh' : _serverDefine;
+const String _serverDefine = String.fromEnvironment('SERVER_URL');
 
 /// Map tiles (OpenStreetMap by default, no API key required).
 const String kTileUrl = String.fromEnvironment(

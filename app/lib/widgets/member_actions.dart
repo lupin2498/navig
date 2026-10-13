@@ -131,7 +131,9 @@ class _MemberSheet extends StatelessWidget {
                         nav.pop();
                         if (state.trail.length < 2) {
                           messenger.showSnackBar(
-                            const SnackBar(content: Text('Chưa có lộ trình trong 24 giờ qua')),
+                            SnackBar(
+                              content: Text('Chưa có lộ trình trong ${state.features.historyHours} giờ qua'),
+                            ),
                           );
                         } else {
                           onFocus();
@@ -141,7 +143,7 @@ class _MemberSheet extends StatelessWidget {
                       }
                     },
                     icon: const Icon(Icons.route),
-                    label: const Text('Lộ trình 24h'),
+                    label: Text('Lộ trình ${state.features.historyHours}h'),
                   ),
                 ),
               ],
@@ -167,7 +169,7 @@ class _MemberSheet extends StatelessWidget {
                   ),
                 ],
               ),
-              if (isOwner)
+              if (isOwner && state.features.removeMembers)
                 TextButton.icon(
                   style: TextButton.styleFrom(foregroundColor: theme.colorScheme.error),
                   onPressed: () => _confirmRemove(context, state, user),
@@ -220,7 +222,7 @@ class _MemberSheet extends StatelessWidget {
     try {
       final delivered = await state.nudge(user.id, message);
       messenger.showSnackBar(SnackBar(
-        content: Text(delivered
+        content: Text(delivered || !state.features.deliveryReceipts
             ? 'Đã gửi tới ${user.name}'
             : '${user.name} đang ngoại tuyến, sẽ không nhận được lời chạm'),
       ));

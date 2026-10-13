@@ -473,7 +473,7 @@ class _MemberSheet extends StatelessWidget {
                     TextButton.icon(
                       onPressed: () => shareInvite(group!, serverUrl: state.serverUrl),
                       icon: const Icon(Icons.person_add_alt_1),
-                      label: Text('Mời · ${group!.code}'),
+                      label: const Text('Mời bạn'),
                     ),
                   ],
                 ),
@@ -488,7 +488,7 @@ class _MemberSheet extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.all(16),
                   child: Text(
-                    'Gửi mã mời ${group!.code} cho bạn bè để cùng xem vị trí của nhau.',
+                    'Gửi mã mời ${group!.code} cho bạn bè (nút "Mời bạn") để cùng xem vị trí của nhau.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                   ),

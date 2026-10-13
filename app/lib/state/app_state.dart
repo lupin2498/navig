@@ -8,17 +8,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config.dart';
 import '../models.dart';
 import '../services/api_client.dart';
+import '../services/backend.dart';
+import '../services/backend_factory.dart';
 import '../services/location_tracker.dart';
-import '../services/realtime_client.dart';
+import '../services/ntfy_backend.dart';
 
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
   AppState(
     this._prefs, {
     LocationTracker Function(void Function(LocationSample) onSample)? createTracker,
-  }) {
+  }) : _store = PrefsStore(_prefs) {
     tracker = (createTracker ?? (onSample) => LocationTracker(onSample: onSample))(_onSample);
   }
 
+  static const _kBackend = 'backend';
   static const _kServer = 'serverUrl';
   static const _kToken = 'token';
   static const _kUser = 'user';
@@ -27,9 +30,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   static const _maxPending = 500;
 
   final SharedPreferences _prefs;
+  final KeyValueStore _store;
   late final LocationTracker tracker;
-  ApiClient? _api;
-  RealtimeClient? _realtime;
+  Backend? _api;
   Geocoding? _geocoding;
   bool _geocodingUnavailable = false;
 
@@ -60,6 +63,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   bool get isLoggedIn => me != null && _api != null;
   bool get sharing => me?.sharing ?? true;
+
+  /// The active backend (Navig server or ntfy), null when logged out.
+  Backend? get backend => _api;
+
+  BackendFeatures get features =>
+      _api?.features ??
+      const BackendFeatures(
+        removeMembers: false,
+        regenerateCode: false,
+        historyHours: 24,
+        deliveryReceipts: false,
+      );
 
   Group? get selectedGroup =>
       groups[selectedGroupId] ?? (groups.isEmpty ? null : groups.values.first);
@@ -97,9 +112,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final cachedUser = _prefs.getString(_kUser);
     selectedGroupId = _prefs.getString(_kSelectedGroup);
 
-    if (serverUrl != null && token != null && cachedUser != null) {
-      _api = ApiClient(serverUrl!, token: token);
-      _applyUser(AppUser.fromJson(jsonDecode(cachedUser) as Map<String, dynamic>), isMe: true);
+    Backend? restored;
+    AppUser? user;
+    if (_prefs.getString(_kBackend) == BackendKind.ntfy.name) {
+      final ntfy = await NtfyBackend.restore(_store);
+      if (ntfy != null) {
+        restored = ntfy;
+        user = ntfy.user;
+        serverUrl = ntfy.baseUrl;
+      }
+    } else if (serverUrl != null && token != null && cachedUser != null) {
+      restored = ApiClient(serverUrl!, token: token);
+      user = AppUser.fromJson(jsonDecode(cachedUser) as Map<String, dynamic>);
+    }
+
+    if (restored != null && user != null) {
+      _api = restored;
+      _applyUser(user, isMe: true);
       final cachedGroups = _prefs.getString(_kGroups);
       if (cachedGroups != null) {
         try {
@@ -121,7 +150,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed || !isLoggedIn) return;
-    _realtime?.reconnectNow();
+    _api?.reconnectNow();
     refresh();
     if (sharing && !tracker.isRunning) startTracking(request: false);
     _flushPending();
@@ -131,15 +160,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     tracker.stop();
-    _realtime?.close();
+    _api?.close();
     _nudges.close();
     super.dispose();
   }
 
   void _startSession() {
-    _realtime?.close();
-    _realtime = RealtimeClient(
-      _api!.wsUri(),
+    _api!.connect(
       onMessage: _onMessage,
       onStatus: (value) {
         connected = value;
@@ -147,7 +174,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         if (value) _flushPending();
       },
     );
-    _realtime!.connect();
     if (sharing) startTracking();
   }
 
@@ -158,22 +184,30 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ---------------------------------------------------------------- account
 
+  /// Creates an account on [server], which may be a Navig server or any
+  /// ntfy server (detected automatically).
   Future<void> register({
     required String server,
     required String name,
     required String color,
     required String emoji,
+    String? ntfyToken,
   }) async {
-    final api = ApiClient(server);
-    if (api.baseUrl.isEmpty) throw const ApiException(0, 'Vui lòng nhập địa chỉ máy chủ');
-    await api.health();
-    final (token, user) = await api.register(name: name, color: color, emoji: emoji);
-    api.token = token;
+    final api = await createAccount(
+      server: server,
+      name: name,
+      color: color,
+      emoji: emoji,
+      store: _store,
+      ntfyToken: ntfyToken,
+    );
     _api = api;
     serverUrl = api.baseUrl;
+    await _prefs.setString(_kBackend, api.kind.name);
     await _prefs.setString(_kServer, api.baseUrl);
-    await _prefs.setString(_kToken, token);
-    _applyUser(user, isMe: true);
+    if (api is ApiClient) await _prefs.setString(_kToken, api.token!);
+    final res = await api.me();
+    _applyUser(AppUser.fromJson(res['user'] as Map<String, dynamic>), isMe: true);
     notifyListeners();
     _startSession();
   }
@@ -218,8 +252,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _clearSession() async {
     tracker.stop();
     trackerStatus = TrackerStatus.stopped;
-    _realtime?.close();
-    _realtime = null;
+    _api?.close();
     _api = null;
     me = null;
     connected = false;
@@ -233,6 +266,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     trail = const [];
     _pending = [];
     await _prefs.remove(_kToken);
+    await _prefs.remove(_kBackend);
+    await _store.write(NtfyBackend.storeKey, null);
     await _prefs.remove(_kUser);
     await _prefs.remove(_kGroups);
     await _prefs.remove(_kSelectedGroup);
@@ -290,7 +325,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<bool> nudge(String userId, String message) => _api!.nudge(userId, message);
 
   Future<void> showTrail(String userId) async {
-    trail = await _api!.history(userId);
+    trail = await _api!.history(userId, hours: features.historyHours);
     trailUserId = userId;
     notifyListeners();
   }
@@ -393,7 +428,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         } else {
           locations.remove(id);
         }
-        lastSeen[id] = DateTime.now();
+        final seen = msg['lastSeen'];
+        lastSeen[id] = seen is num ? DateTime.fromMillisecondsSinceEpoch(seen.toInt()) : DateTime.now();
       case 'profile':
         _applyUser(AppUser.fromJson(msg['user'] as Map<String, dynamic>));
       case 'presence':
